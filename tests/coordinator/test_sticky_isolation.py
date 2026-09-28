@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator, Callable
+from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
 from pytest_mock import MockerFixture
@@ -23,6 +24,16 @@ class CustomStickyAssignor(StickyPartitionAssignor):
         self.configuration = configuration
 
 
+@dataclass(frozen=True)
+class FrozenStickyAssignor(StickyPartitionAssignor):
+    configuration: object
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenSlottedStickyAssignor(StickyPartitionAssignor):
+    configuration: object
+
+
 @pytest.fixture
 async def coordinator_factory(
     mocker: MockerFixture,
@@ -38,12 +49,12 @@ async def coordinator_factory(
 
     def create(assignor: object) -> GroupCoordinator:
         client = AIOKafkaClient()
+        clients.append(client)
         subscription = SubscriptionState()
         subscription.subscribe({"first", "second"})
         coordinator = GroupCoordinator(
             client, subscription, assignors=(assignor,), enable_auto_commit=False
         )
-        clients.append(client)
         coordinators.append(coordinator)
         return coordinator
 
@@ -60,6 +71,8 @@ async def coordinator_factory(
         pytest.param("class", id="builtin_sticky_class"),
         pytest.param("subclass", id="subclass_requiring_configuration"),
         pytest.param("instance", id="configured_slotted_instance"),
+        pytest.param("frozen", id="configured_frozen_dataclass"),
+        pytest.param("frozen_slots", id="configured_frozen_slotted_dataclass"),
     ],
 )
 async def test_sticky_join_state_is_isolated(
@@ -67,11 +80,22 @@ async def test_sticky_join_state_is_isolated(
 ) -> None:
     configuration = object()
     if kind == "class":
-        supplied: object = StickyPartitionAssignor
+        supplied: (
+            type[StickyPartitionAssignor]
+            | CustomStickyAssignor
+            | FrozenStickyAssignor
+            | FrozenSlottedStickyAssignor
+        ) = StickyPartitionAssignor
     elif kind == "subclass":
         supplied = CustomStickyAssignor
+    elif kind == "frozen":
+        supplied = FrozenStickyAssignor(configuration)
+    elif kind == "frozen_slots":
+        supplied = FrozenSlottedStickyAssignor(configuration)
     else:
         supplied = CustomStickyAssignor(configuration)
+    original_type = type(supplied)
+    original_metadata = supplied.metadata({"first"}).user_data
     first = coordinator_factory(supplied)
     second = coordinator_factory(supplied)
     a = first._lookup_assignor("sticky")
@@ -97,10 +121,17 @@ async def test_sticky_join_state_is_isolated(
     next_assignment = ConsumerProtocolMemberAssignment(0, [("first", [0, 2])], b"")
     await first._on_join_complete(2, "first-member", "sticky", next_assignment.encode())
     assert b.member_assignment == [TopicPartition("second", 1)]
-    if kind == "instance":
+    if not isinstance(supplied, type):
+        assert a is not supplied and b is not supplied and a is not b
         assert a.configuration is configuration
         assert b.configuration is configuration
-        assert type(supplied) is CustomStickyAssignor
+        assert type(supplied) is original_type
+        assert supplied.configuration is configuration
+        assert supplied.metadata({"first"}).user_data == original_metadata
+    if isinstance(supplied, (FrozenStickyAssignor, FrozenSlottedStickyAssignor)):
+        for assignor in (supplied, a, b):
+            with pytest.raises(FrozenInstanceError):
+                assignor.configuration = object()  # type: ignore[misc]
 
 
 async def test_new_sticky_consumer_has_no_previous_assignment(

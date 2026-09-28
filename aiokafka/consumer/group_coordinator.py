@@ -52,7 +52,9 @@ def _isolate_sticky_assignor(assignor):
     isolated = copy.copy(assignor)
     if isolated is assignor:
         raise TypeError("A sticky assignor instance must support independent copying")
-    isolated.__class__ = isolated_class
+    # Only change our private copy's class, bypassing user attribute setters
+    # such as those generated for frozen dataclasses.
+    object.__setattr__(isolated, "__class__", isolated_class)
     return isolated
 
 

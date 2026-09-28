@@ -3,6 +3,7 @@ import gc
 import json
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from unittest import mock
 
 import pytest
@@ -128,6 +129,17 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
     @run_until_complete
     async def test_sticky_metadata_is_isolated_between_consumer_groups(self):
+        await self.check_sticky_metadata_isolation(StickyPartitionAssignor)
+
+    @run_until_complete
+    async def test_frozen_sticky_metadata_is_isolated_between_consumer_groups(self):
+        @dataclass(frozen=True, slots=True)
+        class FrozenStickyAssignor(StickyPartitionAssignor):
+            configuration: str
+
+        await self.check_sticky_metadata_isolation(FrozenStickyAssignor("configured"))
+
+    async def check_sticky_metadata_isolation(self, assignor):
         second_topic = self.topic + "-second"
         added_topic = self.topic + "-added"
         for topic in (self.topic, second_topic, added_topic):
@@ -139,7 +151,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
                 topic,
                 bootstrap_servers=self.hosts,
                 group_id=topic + "-group",
-                partition_assignment_strategy=(StickyPartitionAssignor,),
+                partition_assignment_strategy=(assignor,),
                 enable_auto_commit=False,
                 auto_offset_reset="earliest",
             )
